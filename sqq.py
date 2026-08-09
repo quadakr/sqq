@@ -724,6 +724,21 @@ def compute_suggestion(s: str, history: list):
     return (None, "")
 
 
+_BOUNDARY_CHARS = " \t;|&"
+
+def _pattern_matches(norm: str, pattern: str) -> bool:
+    start = 0
+    while True:
+        idx = norm.find(pattern, start)
+        if idx == -1:
+            return False
+        end = idx + len(pattern)
+        before_ok = idx == 0 or norm[idx - 1] in _BOUNDARY_CHARS
+        after_ok = end == len(norm) or norm[end] in _BOUNDARY_CHARS
+        if before_ok and after_ok:
+            return True
+        start = idx + 1
+
 def read_char(fd) -> str:
     b = os.read(fd, 1)
     if not b:
@@ -1064,13 +1079,13 @@ def confirm_dangerous(cmd: str) -> bool:
 
     norm = " ".join(stripped.split())
 
-    dangerous_found = [p for p in CONFIRM_COMMANDS if p in norm]
+    dangerous_found = [p for p in CONFIRM_COMMANDS if _pattern_matches(norm, p)]
     if not dangerous_found:
         return True
 
     try:
         answer = input(
-            f"{CONFIRM_COLOR}This command is harmful. Sure want to run this? (Unsafe: {', '.join(dangerous_found)}) [Y/yes/n]{RESET} "
+            f"{CONFIRM_COLOR}This command is harmful. Sure want to run this? (Unsafe: {', '.join(dangerous_found)}) [Y/yes/N/no]{RESET} "
         )
     except:
         print("\n\nCommand canceled.")
