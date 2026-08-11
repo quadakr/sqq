@@ -1,6 +1,6 @@
 ## Caution: Strictly prohibited for use in California.
 
-# Quarkn
+# Shellqq
 
 Linux only bash wrapper for accelerating your work.
 
@@ -39,7 +39,7 @@ cd ~/Downloads/ ; chmod +x install.sh ; sudo ./install.sh
 
 Or just with one command:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/quadakr/quarkn/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/quadakr/sqq/main/install.sh | sudo bash
 ```
 ---
 
