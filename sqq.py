@@ -382,8 +382,6 @@ CONFIRM_COMMANDS = { # ALL THE COMMANDS FROM LIST ARE HARMFUL
     ": ( ) { : | : & } ; :",
     "fork() { fork | fork & }; fork",
     "fork(){ fork|fork& };fork",
-
-    # Вариации с другими именами функций
     "bomb() { bomb | bomb & }; bomb",
     "forkbomb() { forkbomb | forkbomb & }; forkbomb",
 
@@ -406,7 +404,7 @@ CONFIRM_COMMANDS = { # ALL THE COMMANDS FROM LIST ARE HARMFUL
     "chmod -R 000 /etc",
     "chmod -R 000 /usr",
     "chmod -R 000 /var",
-    "chmod -R 777 /",  # тоже опасно — открывает всё миру
+    "chmod -R 777 /",
     "chmod -R 777 /etc",
     "chmod -R 777 /root",
     "chmod -R 777 /home",
@@ -417,7 +415,7 @@ CONFIRM_COMMANDS = { # ALL THE COMMANDS FROM LIST ARE HARMFUL
     "chmod -R 000 ~/*",
     "chmod -R 000 /*",
 
-    # chown — смена владельца
+
     "chown -R nobody:nobody /",
     "chown -R 0:0 /home",
     "chown -R root:root /home",
@@ -788,6 +786,7 @@ Input:
   Ctrl+J          insert a newline manually without sending the command
   Ctrl+C          cancel current input
   Ctrl+D          exit (on an empty line)
+  alt + backspace = faster erase
   pasting multiline text inserts it as is, without executing line by line
 
 
@@ -814,6 +813,7 @@ sqq — обёртка над bash с автодополнением, истор
   Ctrl+J          вставить перевод строки вручную, не отправляя команду
   Ctrl+C          отменить текущий ввод
   Ctrl+D          выйти (на пустой строке)
+  alt + backspace = быстрое стирание
   вставка (paste) многострочного текста вставляется как есть, без построчного запуска
 
 Прочее:
@@ -896,24 +896,12 @@ def compute_builtin_suggestion(token: str) -> str:
     return ""
 
 
-# --- автодополнение флагов из "<cmd> --help" -------------------------------
-#
-# Идея: пользователь набирает "-" или "--" внутри аргументов команды -> берём
-# первое слово строки (имя команды), один раз прогоняем "<cmd> --help",
-# парсим оттуда флаги вида -x / --xxx и кешируем результат на всю сессию.
-# Запрос всегда идёт в отдельном потоке и никогда не блокирует ввод: пока
-# ответа нет, автодополнение по флагам просто молчит (не мешая
-# path/word/history-вариантам), а появляется на следующей перерисовке, когда
-# поток закончит работу.
-
-_HELP_FLAGS_CACHE = {}          # cmd_name -> list[str] (может быть [])
-_HELP_FLAGS_PENDING = set()     # cmd_name-ы, для которых поток уже запущен
+_HELP_FLAGS_CACHE = {}
+_HELP_FLAGS_PENDING = set()
 _HELP_FLAGS_LOCK = threading.Lock()
 
 _HELP_FLAG_RE = re.compile(r"(?<![\w-])(--[A-Za-z][A-Za-z0-9-]*|-[A-Za-z])(?![\w-])")
 
-# --help этих команд не трогаем: либо это сам sqq, либо потенциально опасно
-# / бессмысленно запускать (cd — не внешний бинарь, его не найдёт which).
 _HELP_FLAGS_BLOCKLIST = {"sqq", "cd"}
 
 
@@ -947,9 +935,6 @@ def _fetch_help_flags(cmd_name: str):
 
 
 def get_help_flags(cmd_name: str) -> list:
-    """Неблокирующий геттер: если ещё не готово — запускает фоновый поток
-    и возвращает [] на этот раз; при следующем вызове (следующая
-    перерисовка) кеш уже может быть заполнен."""
     if not cmd_name or cmd_name in _HELP_FLAGS_BLOCKLIST:
         return []
     with _HELP_FLAGS_LOCK:
@@ -989,9 +974,6 @@ def compute_suggestion(s: str, history: list):
 
     cmd_name = seg_stripped.split(" ", 1)[0] if " " in seg_stripped else ""
     if cmd_name and "/" not in cmd_name:
-        # прогреваем кеш --help заранее, ещё до того как дошли до "-":
-        # к моменту, когда пользователь наберёт флаг, поток скорее всего
-        # уже успеет отработать
         get_help_flags(cmd_name)
         if token.startswith("-") and token != seg_stripped:
             flag_remainder = compute_flag_suggestion(token, get_help_flags(cmd_name))
@@ -1099,6 +1081,16 @@ def read_line(prompt_fn, history: list):
     saved_line = ""
     last_suggestion = ("", "")
     prev_cursor_row = 0
+
+    def delete_backward(n: int):
+        nonlocal cursor
+        start = max(0, cursor - n)
+        del buf[start:cursor]
+        cursor = start
+
+    def delete_forward(n: int):
+        end = min(len(buf), cursor + n)
+        del buf[cursor:end]
 
     def term_width() -> int:
         try:
@@ -1307,6 +1299,8 @@ def read_line(prompt_fn, history: list):
                         insert_text(text)
                     redraw()
 
+
+
                 elif ch == "\x1b":
                     seq = read_escape_sequence(fd)
                     if seq == "[1;5A":
@@ -1317,6 +1311,14 @@ def read_line(prompt_fn, history: list):
                         move_cursor_jump(CTRL_JUMP_CHARS)
                     elif seq == "[1;5D":
                         move_cursor_jump(-CTRL_JUMP_CHARS)
+                    elif seq == "\x7f":         # Alt+Backspace
+                        delete_backward(5)
+                    # elif seq == "\x7f":          # ESC+DEL — Ctrl+Backspace
+                    #     delete_backward(5)
+                    elif seq == "[3~":           # Delete
+                        delete_forward(1)
+                    elif seq == "[3;5~":         # Ctrl+Delete
+                        delete_forward(5)
                     elif seq == "[A":  # up
                         if not move_cursor_vertical(-1):
                             if hist_index > 0:
@@ -1356,7 +1358,7 @@ def read_line(prompt_fn, history: list):
                     cursor += 1
                     redraw()
 
-            except KeyboardInterrupt:       # ← защита на случай, если сигнал проскочит
+            except KeyboardInterrupt:
                 sys.stdout.write("^C\r\n")
                 sys.stdout.flush()
                 buf.clear()
