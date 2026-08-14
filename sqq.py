@@ -6,11 +6,13 @@ import random
 import re
 import select
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
 import sys
 import termios
+import threading
 import time
 import tty
 
@@ -261,25 +263,234 @@ DANGEROUS_FIRST_WORDS = {
     "chmod",
     "chown",
     "pkill",
+    "mkfs"
 }
 
 
-CONFIRM_COMMANDS = {
+CONFIRM_COMMANDS = { # ALL THE COMMANDS FROM LIST ARE HARMFUL
+    # / and /home
     "rm -rf /",
     "rm -rf /*",
     "rm -rf /~",
     "rm -rf /home",
     "rm -rf /home/",
-    ":(){ :|: & };:",
+    "rm -r /",
+    "rm -r /*",
+    "rm -r /~",
+    "rm -r /home",
+    "rm -r /home/",
+
+    # other rm's
+    "rm -rf --no-preserve-root /",
+    "rm -rf / --no-preserve-root",
+    "rm --no-preserve-root -rf /",
+    "rm -rf .",
+    "rm -rf ./",
+    "rm -rf ..",
+    "rm -rf ../",
+    "rm -rf /tmp/..",
+    "rm -rf /var/tmp/..",
+    "rm -rf /usr/..",
+    "rm -rf /root",
+    "rm -rf /root/",
+    "rm -rf /boot",
+    "rm -rf /boot/",
+    "rm -rf /usr",
+    "rm -rf /usr/",
+    "rm -rf /var",
+    "rm -rf /var/",
+    "rm -rf /opt",
+    "rm -rf /opt/",
+    "rm -rf /srv",
+    "rm -rf /srv/",
+    "rm -rf /mnt",
+    "rm -rf /mnt/",
+    "rm -rf /media",
+    "rm -rf /media/",
+
+    # find with delition
+    "find / -name '*' -delete",
+    "find / -type f -delete",
+    "find / -exec rm -rf {} +",
+    "find / -exec rm -rf {} \\;",
+    "find . -name '*' -delete",
+
+    # shred
+    "shred -n 0 -z -u /dev/sda",
+    "shred -n 0 -z -u /dev/sda1",
+    "shred -vfz -n 0 /dev/sda",
+    "shred -vfz -n 0 /dev/sda1",
+    "shred -n 0 -z -u /",
+    "shred -n 0 -z -u /home/*",
+
+    # dd disks rewrite
     "dd if=/dev/zero of=/dev/sda",
     "dd if=/dev/zero of=/dev/sda1",
-    "mkfs.ext4 /dev/sda",
-    "mkfs.ext4 /dev/sda1",
+    "dd if=/dev/zero of=/dev/sdb",
+    "dd if=/dev/zero of=/dev/sdb1",
+    "dd if=/dev/zero of=/dev/hda",
+    "dd if=/dev/zero of=/dev/hda1",
+    "dd if=/dev/zero of=/dev/nvme0n1",
+    "dd if=/dev/zero of=/dev/nvme0n1p1",
+    "dd if=/dev/zero of=/dev/mmcblk0",
+    "dd if=/dev/zero of=/dev/mmcblk0p1",
+    "dd if=/dev/urandom of=/dev/sda",
+    "dd if=/dev/urandom of=/dev/sda1",
+    "dd if=/dev/zero of=/dev/sd*",
+    "dd if=/dev/zero of=/dev/hd*",
+    "dd if=/dev/zero of=/dev/nvme*",
+    "dd if=/dev/zero of=/dev/mmcblk*",
     "dd if=/dev/zero nvme0n1",
     "dd if=/dev/zero nvme0n1p1",
-    "yandex",
+    "dd if=/dev/zero sda",
+    "dd if=/dev/zero sda1",
+
+    # other ways to destroy data
+    "cat /dev/zero > /dev/sda",
+    "cat /dev/urandom > /dev/sda",
+    "yes | dd of=/dev/sda",
+
+    # mkfs format
+    "mkfs.ext4 /dev/sda",
+    "mkfs.ext4 /dev/sda1",
+    "mkfs.ext4 /dev/sdb",
+    "mkfs.ext4 /dev/sdb1",
+    "mkfs.ext3 /dev/sda",
+    "mkfs.ext3 /dev/sda1",
+    "mkfs.ext2 /dev/sda",
+    "mkfs.ext2 /dev/sda1",
+    "mkfs.btrfs /dev/sda",
+    "mkfs.btrfs /dev/sda1",
+    "mkfs.xfs /dev/sda",
+    "mkfs.xfs /dev/sda1",
+    "mkfs.vfat /dev/sda",
+    "mkfs.vfat /dev/sda1",
+    "mkfs.ntfs /dev/sda",
+    "mkfs.ntfs /dev/sda1",
+    "mkfs /dev/sda",
+    "mkfs /dev/sda1",
+
+    # mkswap format
+    "mkswap /dev/sda",
+    "mkswap /dev/sda1",
+    "mkswap /dev/sdb",
+    "mkswap /dev/sdb1",
+
+    # hidden fork bombs
+    ":(){ :|: & };:",
+    ": () { : | : & } ; :",
+    ": ( ) { : | : & } ; :",
+    "fork() { fork | fork & }; fork",
+    "fork(){ fork|fork& };fork",
+
+    # Вариации с другими именами функций
+    "bomb() { bomb | bomb & }; bomb",
+    "forkbomb() { forkbomb | forkbomb & }; forkbomb",
+
+    # memory leak
+    "yes > /dev/null",
+    "yes | head -c 1000000000000",
+    "cat /dev/zero > /dev/null",
+    "python -c 'while True: pass'",  # CPU bomb
+    "perl -e 'fork while fork'",
+
+    # disk leak
+    "yes | tr \\n x | head -c 1000000000 >",
+    "dd if=/dev/zero of=bigfile bs=1M count=1000000",
+    ": > /dev/sda",  # disk rewrite
+
+    # chmod
     "chmod -R 000 /",
+    "chmod -R 000 /home",
+    "chmod -R 000 /root",
+    "chmod -R 000 /etc",
+    "chmod -R 000 /usr",
+    "chmod -R 000 /var",
+    "chmod -R 777 /",  # тоже опасно — открывает всё миру
+    "chmod -R 777 /etc",
+    "chmod -R 777 /root",
+    "chmod -R 777 /home",
+    "chmod -R a+rwx /",
+    "chmod -R a-rwx /",
+    "chmod -R 000 /home/",
+    "chmod -R 000 ~/",
+    "chmod -R 000 ~/*",
+    "chmod -R 000 /*",
+
+    # chown — смена владельца
+    "chown -R nobody:nobody /",
+    "chown -R 0:0 /home",
+    "chown -R root:root /home",
+
+    # sudoers rewrite
+    "> /etc/sudoers",
+    "echo 'ALL ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers",
+
+    # passwd rewrite
+    "> /etc/passwd",
+    "> /etc/shadow",
+    "echo '' > /etc/passwd",
+    "echo '' > /etc/shadow",
+    "rm /etc/passwd",
+    "rm /etc/shadow",
+
+    # Git
+    "git rm -rf .",
+    "git rm -rf --cached .",
+    "git reset --hard HEAD~1000",
+    "git push --force",
+    "git push -f",
+    "git clean -fdx",
+
+    # SQL
+    "mysql -e 'DROP DATABASE mysql'",
+    "mysql -e 'DROP DATABASE information_schema'",
+    "mysql -e 'DROP DATABASE performance_schema'",
+    "mysql -e 'DROP DATABASE sys'",
+    "psql -c 'DROP DATABASE postgres'",
+    "redis-cli FLUSHALL",
+    "redis-cli FLUSHDB",
+    "mongo --eval 'db.dropDatabase()'",
+
+    # LVM
+    "lvremove -y /dev/vg0/lv_root",
+    "lvremove -y -A y /dev/vg0",
+    "vgremove -y vg0",
+    "pvremove -y /dev/sda1",
+
+    # RAID
+    "mdadm --stop /dev/md0",
+    "mdadm --zero-superblock /dev/sda1",
+
+    # other
+    "rm -rf /var/service",
+    "rm -rf /var/service/",
+    "rm -rf /etc/sv",
+    "rm -rf /etc/sv/",
+    "rm -r /var/service",
+    "rm -r /var/service/",
+    "rm -r /etc/sv",
+    "rm -r /etc/sv/",
+    "yandex",
+
 }
+
+
+_BOUNDARY_CHARS = " \t;|&"
+
+
+def _pattern_matches(norm: str, pattern: str) -> bool:
+    start = 0
+    while True:
+        idx = norm.find(pattern, start)
+        if idx == -1:
+            return False
+        end = idx + len(pattern)
+        before_ok = idx == 0 or norm[idx - 1] in _BOUNDARY_CHARS
+        after_ok = end == len(norm) or norm[end] in _BOUNDARY_CHARS
+        if before_ok and after_ok:
+            return True
+        start = idx + 1
 
 
 ANSI_RE = re.compile(r"\033\[[0-9;]*m")
@@ -531,7 +742,7 @@ HARDCODED_HINTS = {
     "userdel": "userdel: check the user twice",
     "passwd": "passwd: changes a password, don't forget to use right layout",
     "visudo": "visudo: edits sudoers, syntax errors can lock out sudo",
-    ">": "'>': don't confuse with '>>', cost file's life",
+    ">": "'>': rewrite file",
     "chrome": "chrome: hope you use firefox. Right?",
     "chromium": "chromium: hope you use firefox. Right?",
     "vivaldi": "vivaldi: hope you use firefox. Right?",
@@ -685,6 +896,84 @@ def compute_builtin_suggestion(token: str) -> str:
     return ""
 
 
+# --- автодополнение флагов из "<cmd> --help" -------------------------------
+#
+# Идея: пользователь набирает "-" или "--" внутри аргументов команды -> берём
+# первое слово строки (имя команды), один раз прогоняем "<cmd> --help",
+# парсим оттуда флаги вида -x / --xxx и кешируем результат на всю сессию.
+# Запрос всегда идёт в отдельном потоке и никогда не блокирует ввод: пока
+# ответа нет, автодополнение по флагам просто молчит (не мешая
+# path/word/history-вариантам), а появляется на следующей перерисовке, когда
+# поток закончит работу.
+
+_HELP_FLAGS_CACHE = {}          # cmd_name -> list[str] (может быть [])
+_HELP_FLAGS_PENDING = set()     # cmd_name-ы, для которых поток уже запущен
+_HELP_FLAGS_LOCK = threading.Lock()
+
+_HELP_FLAG_RE = re.compile(r"(?<![\w-])(--[A-Za-z][A-Za-z0-9-]*|-[A-Za-z])(?![\w-])")
+
+# --help этих команд не трогаем: либо это сам sqq, либо потенциально опасно
+# / бессмысленно запускать (cd — не внешний бинарь, его не найдёт which).
+_HELP_FLAGS_BLOCKLIST = {"sqq", "cd"}
+
+
+def parse_help_flags(text: str) -> list:
+    seen = []
+    for m in _HELP_FLAG_RE.finditer(text):
+        f = m.group(1)
+        if f not in seen:
+            seen.append(f)
+    return sorted(seen)
+
+
+def _fetch_help_flags(cmd_name: str):
+    flags = []
+    try:
+        if shutil.which(cmd_name):
+            proc = subprocess.run(
+                [cmd_name, "--help"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=1.0,
+                text=True,
+            )
+            flags = parse_help_flags(proc.stdout or "")
+    except Exception:
+        flags = []
+    with _HELP_FLAGS_LOCK:
+        _HELP_FLAGS_CACHE[cmd_name] = flags
+        _HELP_FLAGS_PENDING.discard(cmd_name)
+
+
+def get_help_flags(cmd_name: str) -> list:
+    """Неблокирующий геттер: если ещё не готово — запускает фоновый поток
+    и возвращает [] на этот раз; при следующем вызове (следующая
+    перерисовка) кеш уже может быть заполнен."""
+    if not cmd_name or cmd_name in _HELP_FLAGS_BLOCKLIST:
+        return []
+    with _HELP_FLAGS_LOCK:
+        if cmd_name in _HELP_FLAGS_CACHE:
+            return _HELP_FLAGS_CACHE[cmd_name]
+        if cmd_name in _HELP_FLAGS_PENDING:
+            return []
+        _HELP_FLAGS_PENDING.add(cmd_name)
+    threading.Thread(target=_fetch_help_flags, args=(cmd_name,), daemon=True).start()
+    return []
+
+
+def compute_flag_suggestion(token: str, flags: list) -> str:
+    matches = sorted(f for f in flags if f != token and f.startswith(token))
+    if not matches:
+        return ""
+    if len(matches) == 1:
+        return matches[0][len(token):]
+    common = os.path.commonprefix(matches)
+    if len(common) > len(token):
+        return common[len(token):]
+    return ""
+
+
 def compute_suggestion(s: str, history: list):
     seg_begin = segment_start(s)
     segment = s[seg_begin:]
@@ -697,6 +986,17 @@ def compute_suggestion(s: str, history: list):
         remainder = path_remainder(token)
         if remainder:
             return ("path", remainder)
+
+    cmd_name = seg_stripped.split(" ", 1)[0] if " " in seg_stripped else ""
+    if cmd_name and "/" not in cmd_name:
+        # прогреваем кеш --help заранее, ещё до того как дошли до "-":
+        # к моменту, когда пользователь наберёт флаг, поток скорее всего
+        # уже успеет отработать
+        get_help_flags(cmd_name)
+        if token.startswith("-") and token != seg_stripped:
+            flag_remainder = compute_flag_suggestion(token, get_help_flags(cmd_name))
+            if flag_remainder:
+                return ("flag", flag_remainder)
 
     if token and token == seg_stripped:
         builtin_remainder = compute_builtin_suggestion(token)
@@ -723,21 +1023,6 @@ def compute_suggestion(s: str, history: list):
 
     return (None, "")
 
-
-_BOUNDARY_CHARS = " \t;|&"
-
-def _pattern_matches(norm: str, pattern: str) -> bool:
-    start = 0
-    while True:
-        idx = norm.find(pattern, start)
-        if idx == -1:
-            return False
-        end = idx + len(pattern)
-        before_ok = idx == 0 or norm[idx - 1] in _BOUNDARY_CHARS
-        after_ok = end == len(norm) or norm[end] in _BOUNDARY_CHARS
-        if before_ok and after_ok:
-            return True
-        start = idx + 1
 
 def read_char(fd) -> str:
     b = os.read(fd, 1)
@@ -855,11 +1140,11 @@ def read_line(prompt_fn, history: list):
         nonlocal cursor
         cursor = max(0, min(len(buf), cursor + delta))
 
-    def redraw():
+    def redraw(suppress_suggestion=False):
         nonlocal last_suggestion, prev_cursor_row
         s = "".join(buf)
         at_end = cursor == len(buf)
-        if at_end:
+        if at_end and not suppress_suggestion:
             kind, remainder = compute_suggestion(s, history)
         else:
             kind, remainder = (None, "")
@@ -941,7 +1226,7 @@ def read_line(prompt_fn, history: list):
         kind, remainder = last_suggestion
         if not remainder:
             return
-        if kind in ("path", "word") or full:
+        if kind in ("path", "word", "flag") or full:
             chunk = remainder
         else:
             chunk = next_word_chunk(remainder)
@@ -963,95 +1248,122 @@ def read_line(prompt_fn, history: list):
         redraw()
         while True:
             try:
-                r, _, _ = select.select([fd], [], [], DECOR_UPDATE_INTERVAL)
-            except (OSError, InterruptedError):
-                r = None
-            if not r:
-                redraw()
-                continue
+                try:
+                    r, _, _ = select.select([fd], [], [], DECOR_UPDATE_INTERVAL)
+                except (OSError, InterruptedError):
+                    r = None
+                if not r:
+                    redraw()
+                    continue
 
-            ch = read_char(fd)
-            if ch == "":
-                continue
+                ch = read_char(fd)
+                if ch == "":
+                    continue
 
-            if ch == "\r":
-                sys.stdout.write("\r\n")
-                sys.stdout.flush()
-                return "".join(buf)
-
-            elif ch == "\n":
-                insert_text("\n")
-                redraw()
-
-            elif ch == "\x03":
-                sys.stdout.write("^C\r\n")
-                sys.stdout.flush()
-                return ""
-
-            elif ch == "\x04":
-                if not buf:
+                if ch == "\r":
+                    last_suggestion = (None, "")
+                    redraw(suppress_suggestion=True)
                     sys.stdout.write("\r\n")
                     sys.stdout.flush()
-                    return None
+                    return "".join(buf)
 
-            elif ch in ("\x7f", "\x08"):
-                if cursor > 0:
-                    del buf[cursor - 1]
-                    cursor -= 1
-                redraw()
-
-            elif ch == "\t":
-                accept_suggestion(full=False)
-                redraw()
-
-            elif ch == "\x1b":
-                seq = read_escape_sequence(fd)
-                if seq == "[1;5A":
-                    move_cursor_line_start()
-                elif seq == "[1;5B":
-                    move_cursor_line_end()
-                elif seq == "[1;5C":
-                    move_cursor_jump(CTRL_JUMP_CHARS)
-                elif seq == "[1;5D":
-                    move_cursor_jump(-CTRL_JUMP_CHARS)
-                elif seq == "[A":  # up
-                    if not move_cursor_vertical(-1):
-                        if hist_index > 0:
-                            if hist_index == len(history):
-                                saved_line = "".join(buf)
-                            hist_index -= 1
-                            buf = list(history[hist_index])
-                            cursor = len(buf)
-                elif seq == "[B":  # down
-                    if not move_cursor_vertical(1):
-                        if hist_index < len(history):
-                            hist_index += 1
-                            buf = (
-                                list(saved_line)
-                                if hist_index == len(history)
-                                else list(history[hist_index])
-                            )
-                            cursor = len(buf)
-                elif seq == "[C":  # right
-                    if cursor < len(buf):
-                        cursor += 1
-                elif seq == "[D":  # left
-                    if cursor > 0:
-                        cursor -= 1
-                elif seq == PASTE_SEQ_START:
-                    insert_text(read_bracketed_paste(fd))
-                elif (
-                    seq in ("\r", "\n")
-                    or _CSI_U_ENTER_RE.match(seq)
-                    or _MODIFY_OTHER_KEYS_ENTER_RE.match(seq)
-                ):
+                elif ch == "\n":
                     insert_text("\n")
-                redraw()
+                    redraw()
 
-            elif ch.isprintable():
-                buf.insert(cursor, ch)
-                cursor += 1
-                redraw()
+                elif ch == "\x03":          # ← Ctrl+C
+                    sys.stdout.write("^C\r\n")
+                    sys.stdout.flush()
+                    buf.clear()
+                    cursor = 0
+                    hist_index = len(history)
+                    saved_line = ""
+                    continue
+
+                elif ch == "\x04":
+                    if not buf:
+                        sys.stdout.write("\r\n")
+                        sys.stdout.flush()
+                        return None
+
+                elif ch == "\x1a":          # ← Ctrl+Z
+                    _sigtstp_handler(signal.SIGTSTP, None)
+                    redraw()
+                    continue
+
+                elif ch in ("\x7f", "\x08"):
+                    if cursor > 0:
+                        del buf[cursor - 1]
+                        cursor -= 1
+                    redraw()
+
+                elif ch == "\t":
+                    accept_suggestion(full=False)
+                    redraw()
+
+                elif ch == "\x16":          # ← Ctrl+V (уже было)
+                    text = paste_from_clipboard()
+                    if text:
+                        insert_text(text)
+                    redraw()
+
+                elif ch == "\x1b":
+                    seq = read_escape_sequence(fd)
+                    if seq == "[1;5A":
+                        move_cursor_line_start()
+                    elif seq == "[1;5B":
+                        move_cursor_line_end()
+                    elif seq == "[1;5C":
+                        move_cursor_jump(CTRL_JUMP_CHARS)
+                    elif seq == "[1;5D":
+                        move_cursor_jump(-CTRL_JUMP_CHARS)
+                    elif seq == "[A":  # up
+                        if not move_cursor_vertical(-1):
+                            if hist_index > 0:
+                                if hist_index == len(history):
+                                    saved_line = "".join(buf)
+                                hist_index -= 1
+                                buf = list(history[hist_index])
+                                cursor = len(buf)
+                    elif seq == "[B":  # down
+                        if not move_cursor_vertical(1):
+                            if hist_index < len(history):
+                                hist_index += 1
+                                buf = (
+                                    list(saved_line)
+                                    if hist_index == len(history)
+                                    else list(history[hist_index])
+                                )
+                                cursor = len(buf)
+                    elif seq == "[C":  # right
+                        if cursor < len(buf):
+                            cursor += 1
+                    elif seq == "[D":  # left
+                        if cursor > 0:
+                            cursor -= 1
+                    elif seq == PASTE_SEQ_START:
+                        insert_text(read_bracketed_paste(fd))
+                    elif (
+                        seq in ("\r", "\n")
+                        or _CSI_U_ENTER_RE.match(seq)
+                        or _MODIFY_OTHER_KEYS_ENTER_RE.match(seq)
+                    ):
+                        insert_text("\n")
+                    redraw()
+
+                elif ch.isprintable():
+                    buf.insert(cursor, ch)
+                    cursor += 1
+                    redraw()
+
+            except KeyboardInterrupt:       # ← защита на случай, если сигнал проскочит
+                sys.stdout.write("^C\r\n")
+                sys.stdout.flush()
+                buf.clear()
+                cursor = 0
+                hist_index = len(history)
+                saved_line = ""
+                continue
 
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
@@ -1097,6 +1409,21 @@ def confirm_dangerous(cmd: str) -> bool:
 
     return confirmed
 
+def paste_from_clipboard() -> str:
+    for cmd in (
+        ["wl-paste"],
+        ["xclip", "-selection", "clipboard", "-o"],
+        ["pbpaste"],
+    ):
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=1
+            )
+            if result.returncode == 0:
+                return result.stdout
+        except Exception:
+            continue
+    return ""
 
 def run_command(cmd: str, aliases: dict):
     expanded = expand_aliases(cmd, aliases)
@@ -1105,8 +1432,8 @@ def run_command(cmd: str, aliases: dict):
         fixed = transliterate_layout(cmd)
         if fixed == cmd:
             return
-        first_word = fixed.split()[0] if fixed.split() else ""
-        if first_word in DANGEROUS_FIRST_WORDS:
+        tokens = [t for t in _TOKEN_SPLIT_RE.split(fixed) if t]
+        if any(t in DANGEROUS_FIRST_WORDS for t in tokens):
             print(
                 f"{DIM}'{cmd}' seems to be a wrong layout ({fixed}), but not to redirect, command potentially unsafe"
                 f"{RESET}"
