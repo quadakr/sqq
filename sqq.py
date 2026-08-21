@@ -469,7 +469,7 @@ CONFIRM_COMMANDS = { # ALL THE COMMANDS FROM LIST ARE HARMFUL
     "rm -r /var/service/",
     "rm -r /etc/sv",
     "rm -r /etc/sv/",
-    "yandex",
+    # "yandex",
 
 }
 
@@ -1399,7 +1399,7 @@ def confirm_dangerous(cmd: str) -> bool:
 
     try:
         answer = input(
-            f"{CONFIRM_COLOR}This command is harmful. Sure want to run this? (Unsafe: {', '.join(dangerous_found)}) [Y/yes/N/no]{RESET} "
+            f"{CONFIRM_COLOR}This command is usually harmful. Sure want to run this? (Unsafe: {', '.join(dangerous_found)}) [Y/yes/N/no]{RESET} "
         )
     except:
         print("\n\nCommand canceled.")
